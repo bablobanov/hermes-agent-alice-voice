@@ -7,5 +7,7 @@ def register(ctx):
     if not bridge.enabled:
         return
     ctx.register_telegram_handler(bridge.on_telegram_connect)
-    ctx.on_unload(bridge.close)
-    bridge.take_over_after_reload()  # a plugin reload: the engine will not call the factory again
+    # None: the engine abandoned this load past its deadline and ignores registrations from now on,
+    # so nothing would ever close a listener started here.
+    if ctx.on_unload(bridge.close) is not None:
+        bridge.adopt()  # a plugin reload: the engine will not call the factory again

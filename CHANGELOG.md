@@ -2,12 +2,17 @@
 
 ## Unreleased
 
-- The voice input survives a plugin reload. `hermes plugins enable`/`disable` of any plugin and the
-  Desktop switch send a running gateway `reload-plugins`: the plugin is unloaded (the listener closes)
-  and registered again, but Hermes does not call the same connect factory twice on one Telegram client,
-  so the listener stayed down until a gateway restart (Hermes 0.22.2 and 0.23.0 alike). The unload now
-  leaves a process-wide marker and the next registration takes the listener over on the same port. A
-  disabled plugin keeps it closed. Two regression tests; 13 bridge + 4 control tests.
+- The voice input survives a plugin reload. Any forced plugin re-discovery in a running gateway
+  (`hermes plugins enable`/`disable` of any plugin, the Desktop switch, a TTS or image tool that
+  re-scans plugins for a missing provider) unloads the plugin, which closes the listener, and registers
+  it again. Hermes does not call a connect factory it has already wired on the same Telegram client, and
+  after a disable no re-wire runs at all, so the listener stayed down until a gateway restart (Hermes
+  0.22.2 and 0.23.0 alike). The unload now leaves a process-wide marker and the next registration takes
+  the listener over on the same port. A Telegram connect that reaches an unloaded bridge (a factory
+  list taken before the unload) starts its successor, or leaves the right for the next registration.
+  A disabled plugin keeps the port closed; a load the engine abandoned past its deadline never takes it
+  over; a failed bind keeps the right for the next reload. Seven regression tests; 18 bridge + 4
+  control tests.
 
 ## 0.3.0
 

@@ -32,30 +32,32 @@ def is_paused():
     return is_engaged()
 
 
-# A plugin reload in a running gateway (reload-plugins: `hermes plugins enable/disable`, the Desktop
-# switch) unloads this plugin, which closes the listener, and registers it again. The engine does not
-# call the new connect factory on the same Telegram client: it keys factories by plugin and
-# __qualname__ and skips a known key. So the unload leaves a marker, and the next registration in the
-# same process takes the listener over. The marker lives in sys.modules because the engine imports the
-# plugin package again on a forced re-discovery, which would reset a module global.
+# A forced plugin re-discovery in a running gateway (reload-plugins from `hermes plugins enable/disable`,
+# the Desktop switch, a tool re-scanning for a missing provider) unloads this plugin, which closes the
+# listener, and registers it again. The engine does not call the new connect factory on the same
+# Telegram client: it keys factories by plugin and __qualname__ and skips a known key. So the right to
+# listen, which only the gateway's Telegram connect grants, is handed across the reload: an unload that
+# closed a serving listener leaves it pending, and so does a connect that reaches an unloaded bridge
+# (a factory list taken before the unload) while no successor is registered yet; with a successor, that
+# connect starts the successor. The registration takes a pending right once. The state lives in
+# sys.modules because the engine imports the plugin package again on a re-discovery, which would reset
+# a module global. One owner per process: the plugin runs only in the default profile.
 _HANDOVER = "_alice_voice_listener_handover"
 
 
 def _handover():
     module = sys.modules.get(_HANDOVER)
     if module is None:
-        fresh = types.ModuleType(_HANDOVER, "alice-voice: a listener closed by a plugin unload")
-        fresh.lock, fresh.pending = Lock(), False
+        fresh = types.ModuleType(_HANDOVER, "alice-voice: the right to listen across a plugin reload")
+        fresh.lock, fresh.pending, fresh.current = Lock(), False, None
         module = sys.modules.setdefault(_HANDOVER, fresh)
     return module
 
 
-def take_handover():
-    """True once after an unload closed a serving listener in this process."""
+def arm_handover():
     state = _handover()
     with state.lock:
-        pending, state.pending = state.pending, False
-    return pending
+        state.pending = True
 
 
 class AliceBridge:
@@ -64,6 +66,7 @@ class AliceBridge:
         self.cache = OrderedDict()
         self.lock = RLock()
         self.server = self.thread = None
+        self.unloaded = False  # set by close(), the engine's unload; unlike a disabled configuration
         self.paused = paused or is_paused
         self.session_key = ctx.get_config("session_key", "")
         self.skill_id = ctx.get_config("skill_id", "")
@@ -139,7 +142,17 @@ class AliceBridge:
         return result
 
     def on_telegram_connect(self, _native, _adapter):
-        self.start()
+        with self.lock:  # checked and started under one lock: close() cannot slip in between
+            if not self.unloaded:
+                self.start()
+                return
+        state = _handover()
+        with state.lock:
+            successor = state.current
+            if successor is None or successor is self:
+                state.pending = True  # the next registration takes it
+                return
+        successor.start_or_keep_pending()
 
     def start(self):
         with self.lock:
@@ -151,29 +164,42 @@ class AliceBridge:
                                  name="alice-voice", daemon=True)
             self.thread.start()
 
-    def take_over_after_reload(self):
-        """In register(): listen now if an unload in this process closed a serving listener."""
-        if not self.enabled or not take_handover():
-            return
+    def start_or_keep_pending(self):
         try:
             self.start()
-        except OSError as exc:  # the port is taken: a later Telegram connect still binds
+        except OSError as exc:  # the port is taken: the next reload tries again, so does a new Telegram client
+            arm_handover()
             logger.warning("alice-voice: listener not restored after the plugin reload (%s)", type(exc).__name__)
+
+    def adopt(self):
+        """In register(), once the engine accepted the unload callback: become this process's bridge and
+        take a pending right to listen."""
+        if not self.enabled:
+            return
+        state = _handover()
+        with state.lock:
+            state.current = self
+            pending, state.pending = state.pending, False
+        if pending:
+            self.start_or_keep_pending()
 
     def close(self):
         with self.lock:
             self.enabled = False
+            self.unloaded = True
             self.cache.clear()
             server, thread = self.server, self.thread
             self.server = self.thread = None
+        state = _handover()
+        with state.lock:
+            if state.current is self:
+                state.current = None
         if server is not None:
             server.shutdown()
             server.server_close()
             assert thread is not None
             thread.join(timeout=2)
-            state = _handover()
-            with state.lock:
-                state.pending = True
+            arm_handover()
 
 
 class AliceServer(HTTPServer):
