@@ -47,11 +47,10 @@ class Context:
 
 
 class AbandonedLoadContext(Context):
-    """The engine's context once a load overran plugins.load_timeout_seconds: every registrar is a
-    no-op returning None (hermes_cli/plugins.py _ignore_after_abandoned_load, 0.22.2 and 0.23.0)."""
-
-    def register_telegram_handler(self, factory):
-        return None
+    """A load that crosses plugins.load_timeout_seconds: from the deadline on, every registrar is a no-op
+    returning None (hermes_cli/plugins.py _ignore_after_abandoned_load, 0.22.2 and 0.23.0). Here the
+    deadline lands right before on_unload, so a factory registered after it would still be recorded:
+    the plugin must not register one."""
 
     def on_unload(self, callback):
         return None
@@ -345,6 +344,7 @@ class BridgeTests(unittest.TestCase):
         self.serve_then_unload(port)
         abandoned = AbandonedLoadContext(port=port)
         self.load_plugin("alice_abandoned").register(abandoned)
+        self.assertEqual(abandoned.factories, [])  # no factory without its cleanup
         self.assertFalse(listening(port))
         ctx = Context(port=port)
         self.load_plugin("alice_next").register(ctx)
@@ -394,6 +394,33 @@ class BridgeTests(unittest.TestCase):
         self.assertIsNone(late_factory.__self__.server)  # the unloaded bridge itself never binds
         self.assertEqual(self.post(port, "after the late connect", 1), (200, ACK))
         self.assertEqual([call[0] for call in new.calls], ["after the late connect"])
+
+    def test_successor_unloaded_between_handover_and_start_leaves_the_right_pending(self):
+        """A late connect picks the registered successor; another reload unloads that successor before
+        it starts. The right must come back for the next registration, not vanish."""
+        port = free_port()
+        old = Context(port=port)
+        self.load_plugin("alice_race_old").register(old)
+        late_factory = old.factories[0]
+        for callback in old.cleanup:
+            callback()
+        successor = Context(port=port)
+        self.load_plugin("alice_race_successor").register(successor)
+        bridge = successor.factories[0].__self__
+        real_start = bridge.start
+
+        def unloaded_first():  # the barrier: the successor's unload lands right before its start
+            for callback in successor.cleanup:
+                callback()
+            return real_start()
+
+        bridge.start = unloaded_first
+        late_factory(None, object())
+        self.assertFalse(listening(port))
+        third = Context(port=port)
+        self.load_plugin("alice_race_third").register(third)
+        self.addCleanup(lambda: [callback() for callback in third.cleanup])
+        self.assertTrue(listening(port))
 
     def test_late_connect_before_the_successor_registers_leaves_the_right_pending(self):
         port = free_port()

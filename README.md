@@ -50,7 +50,7 @@ plugins:
 `session_key` must name an existing authorized Telegram DM with a positive numeric user ID. It is fixed by operator configuration, never selected by the payload. `owner_user_id` is optional: use `""` only if you deliberately accept any signed-in account presenting the bearer and matching skill ID. Placeholder skill/secret/session values will not activate the plugin.
 
 4. Configure your HTTPS reverse proxy to forward the exact `/alice/<YOUR_64_HEX_RANDOM_SECRET>` path to the loopback listener on the configured port. In your **private** Alice skill, set the corresponding HTTPS webhook using your own domain and secret. Keep this URL out of screenshots, issues, shell history, proxy access logs, and analytics. No public endpoint or proxy configuration is included here.
-5. Restart your gateway using your normal Hermes workflow. Importing or registering the plugin in the CLI does **not** open a port. The listener binds only when the gateway invokes the Telegram connect factory; unload closes it. A plugin reload in a running gateway (`hermes plugins enable`/`disable` of any plugin, the Desktop switch, a tool that re-scans plugins for a missing provider) unloads and registers the plugin again without calling the factory a second time, so the new registration takes the listener over on the same port; disabling the plugin keeps it closed. It binds `127.0.0.1` (default port `8788`), not a public interface. Establish the Telegram session first, then test a harmless voice task and separately confirm its result in Telegram.
+5. Restart your gateway using your normal Hermes workflow. Importing or registering the plugin in the CLI does **not** open a port. The listener binds only when the gateway invokes the Telegram connect factory; unload closes it. A plugin reload in a running gateway (`hermes plugins install`/`enable`/`disable`/`update` of any plugin, the Desktop switch, a tool that re-scans plugins for a missing provider) unloads and registers the plugin again without calling the factory a second time, so the new registration takes the listener over on the same port; disabling the plugin keeps it closed. It binds `127.0.0.1` (default port `8788`), not a public interface. Establish the Telegram session first, then test a harmless voice task and separately confirm its result in Telegram.
 
 ## Security and limits
 
@@ -69,7 +69,7 @@ From the repository root:
 python -B -m unittest discover -s plugins/alice-voice -v
 ```
 
-Public CI runs on Python 3.11, 3.12, and 3.13: **18 bridge + 4 control tests** with synthetic IDs and ephemeral bearers. Loopback HTTP tests use temporary ports, no Telegram/Yandex connection. The optional SDK wrapper skips unless explicitly configured; a skip is not an integration pass.
+Public CI runs on Python 3.11, 3.12, and 3.13: **19 bridge + 4 control tests** with synthetic IDs and ephemeral bearers. Loopback HTTP tests use temporary ports, no Telegram/Yandex connection. The optional SDK wrapper skips unless explicitly configured; a skip is not an integration pass.
 
 For a reviewed Hermes checkout/runtime with dependencies installed:
 

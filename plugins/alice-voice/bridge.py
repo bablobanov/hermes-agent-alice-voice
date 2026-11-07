@@ -155,33 +155,44 @@ class AliceBridge:
         successor.start_or_keep_pending()
 
     def start(self):
+        """True when this bridge listens afterwards; False when it is unloaded (or disabled)."""
         with self.lock:
-            if not self.enabled or self.server is not None:
-                return
+            if self.server is not None:
+                return True
+            if not self.enabled:
+                return False
             self.server = AliceServer(("127.0.0.1", self.port), AliceHandler)
             self.server.bridge = self
             self.thread = Thread(target=self.server.serve_forever, kwargs={"poll_interval": 0.1},
                                  name="alice-voice", daemon=True)
             self.thread.start()
+            return True
 
     def start_or_keep_pending(self):
+        """Use a handed-over right to listen, or put it back for the next registration: when this bridge
+        was unloaded before it could start (its close() saw no listener and left nothing pending), or
+        when the port is taken (the next reload tries again, so does a new Telegram client)."""
         try:
-            self.start()
-        except OSError as exc:  # the port is taken: the next reload tries again, so does a new Telegram client
-            arm_handover()
+            if self.start():
+                return
+        except OSError as exc:
             logger.warning("alice-voice: listener not restored after the plugin reload (%s)", type(exc).__name__)
+        arm_handover()
 
     def adopt(self):
         """In register(), once the engine accepted the unload callback: become this process's bridge and
-        take a pending right to listen."""
-        if not self.enabled:
-            return
-        state = _handover()
-        with state.lock:
-            state.current = self
-            pending, state.pending = state.pending, False
-        if pending:
-            self.start_or_keep_pending()
+        take a pending right to listen. Under the bridge lock throughout, so an unload that lands now (a
+        load deadline firing) closes either before (nothing taken) or after (a serving listener, whose
+        close() leaves the right pending again). Lock order everywhere: bridge, then state."""
+        with self.lock:
+            if not self.enabled:
+                return
+            state = _handover()
+            with state.lock:
+                state.current = self
+                pending, state.pending = state.pending, False
+            if pending:
+                self.start_or_keep_pending()
 
     def close(self):
         with self.lock:
