@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- The voice input survives a plugin reload. `hermes plugins enable`/`disable` of any plugin and the
+  Desktop switch send a running gateway `reload-plugins`: the plugin is unloaded (the listener closes)
+  and registered again, but Hermes does not call the same connect factory twice on one Telegram client,
+  so the listener stayed down until a gateway restart (Hermes 0.22.2 and 0.23.0 alike). The unload now
+  leaves a process-wide marker and the next registration takes the listener over on the same port. A
+  disabled plugin keeps it closed. Two regression tests; 13 bridge + 4 control tests.
+
 ## 0.3.0
 
 - Minimal public release of private Alice voice input using stock Hermes gateway injection.

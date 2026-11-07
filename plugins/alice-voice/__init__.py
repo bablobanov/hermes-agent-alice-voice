@@ -8,3 +8,4 @@ def register(ctx):
         return
     ctx.register_telegram_handler(bridge.on_telegram_connect)
     ctx.on_unload(bridge.close)
+    bridge.take_over_after_reload()  # a plugin reload: the engine will not call the factory again
