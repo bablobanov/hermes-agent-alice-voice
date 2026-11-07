@@ -45,6 +45,13 @@ class Context:
         self.cleanup.append(callback)
 
 
+def free_port():
+    import socket
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        return probe.getsockname()[1]
+
+
 def envelope(text="Сохрани заметку: Xiaomi 14T Pro", message_id=1):
     return {"version": "1.0", "request": {"type": "SimpleUtterance",
             "command": text.lower(), "original_utterance": text},
@@ -60,6 +67,9 @@ class BridgeTests(unittest.TestCase):
         self.env.start()
         self.addCleanup(self.env.stop)
         self.path = "/alice/" + self.secret
+        # Process-wide reload marker (bridge.py): every test starts as a fresh process.
+        sys.modules.pop("_alice_voice_listener_handover", None)
+        self.addCleanup(sys.modules.pop, "_alice_voice_listener_handover", None)
 
     def bridge(self, ctx=None, paused=lambda: False):
         if not (ROOT / "bridge.py").exists():
@@ -251,6 +261,69 @@ class BridgeTests(unittest.TestCase):
         ctx.factories[0](None, object())
         self.assertIsNone(bridge.server)
         self.assertEqual(ctx.calls, [])
+
+    def load_plugin(self, name):
+        """A fresh copy of the plugin package, as the engine imports it again on a forced re-discovery."""
+        spec = importlib.util.spec_from_file_location(name, ROOT / "__init__.py",
+                                                     submodule_search_locations=[str(ROOT)])
+        assert spec is not None and spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module
+        self.addCleanup(sys.modules.pop, spec.name, None)
+        self.addCleanup(sys.modules.pop, spec.name + ".bridge", None)
+        spec.loader.exec_module(module)
+        return module
+
+    def post(self, port, text, message_id):
+        connection = http.client.HTTPConnection("127.0.0.1", port, timeout=2)
+        try:
+            connection.request("POST", self.path, body=json.dumps(envelope(text, message_id)).encode(),
+                               headers={"Content-Type": "application/json"})
+            response = connection.getresponse()
+            return response.status, json.loads(response.read())["response"]["text"]
+        finally:
+            connection.close()
+
+    def test_listener_comes_back_after_a_plugin_reload(self):
+        """`hermes plugins enable/disable` of any plugin, or the Desktop switch, sends a running gateway
+        `reload-plugins`: a forced re-discovery unloads every plugin and registers it again. The engine
+        keys a connect factory by (plugin, __qualname__) and skips a known key on the same Telegram
+        client, so the new AliceBridge.on_telegram_connect is never called (Hermes 0.22.2 and 0.23.0,
+        gateway/platforms/base.py _wire_plugin_handlers), while the unload closed the old listener.
+        The new registration must take the fixed port over itself; requests then reach the new
+        context, never the unloaded one."""
+        port = free_port()
+        old_ctx = Context(port=port)
+        self.load_plugin("alice_reload_before").register(old_ctx)
+        old_ctx.factories[0](None, object())  # the gateway's Telegram connect
+        self.assertEqual(self.post(port, "before the reload", 1), (200, ACK))
+        for callback in old_ctx.cleanup:  # the forced re-discovery unloads ...
+            callback()
+        new_ctx = Context(port=port)
+        self.load_plugin("alice_reload_after").register(new_ctx)  # ... and registers again
+        self.addCleanup(lambda: [callback() for callback in new_ctx.cleanup])
+        # The engine does not call new_ctx.factories[0]: same plugin, same qualname, same client.
+        self.assertEqual(self.post(port, "after the reload", 2), (200, ACK))
+        self.assertEqual([call[0] for call in old_ctx.calls], ["before the reload"])
+        self.assertEqual([call[0] for call in new_ctx.calls], ["after the reload"])
+        bridge = new_ctx.factories[0].__self__
+        server = bridge.server
+        new_ctx.factories[0](None, object())  # a later Telegram reconnect: no second bind
+        self.assertIs(bridge.server, server)
+
+    def test_reload_without_a_serving_listener_binds_nothing(self):
+        """A registration that follows no serving listener (a CLI process, or a gateway whose Telegram
+        never connected) still binds only on the connect factory."""
+        ctx = Context(port=free_port())
+        self.load_plugin("alice_first_load").register(ctx)
+        self.addCleanup(lambda: [callback() for callback in ctx.cleanup])
+        self.assertIsNone(ctx.factories[0].__self__.server)
+        for callback in ctx.cleanup:  # unload before any connect
+            callback()
+        again = Context(port=ctx.settings["port"])
+        self.load_plugin("alice_second_load").register(again)
+        self.addCleanup(lambda: [callback() for callback in again.cleanup])
+        self.assertIsNone(again.factories[0].__self__.server)
 
 
     def test_close_releases_lock_before_shutdown(self):
