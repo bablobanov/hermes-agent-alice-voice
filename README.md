@@ -4,7 +4,7 @@
 
 [Русский](README.ru.md) · [Contributing](CONTRIBUTING.md) · [Security](SECURITY.md)
 
-**0.3.0 — voice input only, without Hermes SDK patches.** A private Yandex Alice skill sends recognized text to one existing Hermes Telegram DM session. Hermes processes the task through its normal gateway; the result is delivered in Telegram, not spoken by Alice.
+**0.3.1 — voice input only, without Hermes SDK patches.** A private Yandex Alice skill sends recognized text to one existing Hermes Telegram DM session. Hermes processes the task through its normal gateway; the result is delivered in Telegram, not spoken by Alice.
 
 ```text
 Alice → private skill → HTTPS endpoint → local plugin → stock gateway injection → Telegram

@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.3.1
 
 - The voice input survives a plugin reload. Any forced plugin re-discovery in a running gateway
   (`hermes plugins install`/`enable`/`update` of any plugin, `disable` too from Hermes 0.23, the
