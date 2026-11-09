@@ -85,7 +85,7 @@ class BridgeTests(unittest.TestCase):
         self.env.start()
         self.addCleanup(self.env.stop)
         self.path = "/alice/" + self.secret
-        # Process-wide reload marker (bridge.py): every test starts as a fresh process.
+        # Process-wide state that outlives a plugin reload (bridge.py): every test starts as a fresh process.
         sys.modules.pop("_alice_voice_listener_handover", None)
         self.addCleanup(sys.modules.pop, "_alice_voice_listener_handover", None)
 
@@ -339,7 +339,7 @@ class BridgeTests(unittest.TestCase):
 
     def test_abandoned_load_never_takes_the_listener_over(self):
         """A reload whose load timed out: no unload callback could ever close a listener started there.
-        The marker stays for the next registration."""
+        The next registration still listens."""
         port = free_port()
         self.serve_then_unload(port)
         abandoned = AbandonedLoadContext(port=port)
@@ -351,7 +351,7 @@ class BridgeTests(unittest.TestCase):
         self.addCleanup(lambda: [callback() for callback in ctx.cleanup])
         self.assertTrue(listening(port))
 
-    def test_failed_takeover_keeps_the_marker_for_the_next_reload(self):
+    def test_failed_bind_after_a_reload_is_retried_by_the_next_one(self):
         port = free_port()
         self.serve_then_unload(port)
         busy = Context(port=port)
@@ -388,16 +388,16 @@ class BridgeTests(unittest.TestCase):
         new = Context(port=port)
         self.load_plugin("alice_late_new").register(new)
         self.addCleanup(lambda: [callback() for callback in new.cleanup])
-        self.assertFalse(listening(port))  # nothing was serving: no marker
+        self.assertFalse(listening(port))  # no Telegram connect in this process yet
         late_factory(None, object())
         self.assertTrue(listening(port))
         self.assertIsNone(late_factory.__self__.server)  # the unloaded bridge itself never binds
         self.assertEqual(self.post(port, "after the late connect", 1), (200, ACK))
         self.assertEqual([call[0] for call in new.calls], ["after the late connect"])
 
-    def test_successor_unloaded_between_handover_and_start_leaves_the_right_pending(self):
+    def test_successor_unloaded_between_handover_and_start_the_next_registration_listens(self):
         """A late connect picks the registered successor; another reload unloads that successor before
-        it starts. The right must come back for the next registration, not vanish."""
+        it starts. The next registration must listen."""
         port = free_port()
         old = Context(port=port)
         self.load_plugin("alice_race_old").register(old)
@@ -450,7 +450,7 @@ class BridgeTests(unittest.TestCase):
         self.assertEqual(self.post(port, "after the race", 1), (200, ACK))
         self.assertEqual([call[0] for call in second.calls], ["after the race"])
 
-    def test_late_connect_before_the_successor_registers_leaves_the_right_pending(self):
+    def test_late_connect_before_the_successor_registers_lets_it_listen(self):
         port = free_port()
         old = Context(port=port)
         self.load_plugin("alice_early_old").register(old)
@@ -465,7 +465,7 @@ class BridgeTests(unittest.TestCase):
 
     def test_disabled_or_foreign_registration_keeps_the_right_and_binds_nothing(self):
         """A reload that registers the plugin disabled in its settings, or in a non-default profile,
-        neither binds nor takes the right; enabling it again in the default profile does."""
+        binds nothing; enabling it again in the default profile listens at once."""
         port = free_port()
         self.serve_then_unload(port)
         foreign = Context(port=port)

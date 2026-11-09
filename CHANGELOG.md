@@ -7,12 +7,14 @@
   image tool that re-scans plugins for a missing provider) unloads the plugin, which closes the
   listener, and registers it again. Hermes does not call a connect factory it has already wired on
   the same Telegram client, and after a disable no re-wire runs at all, so the listener stayed down
-  until a gateway restart (Hermes 0.22.2 and 0.23.0 alike). The unload now leaves a process-wide
-  marker and the next registration takes the listener over on the same port. A Telegram connect that
-  reaches an unloaded bridge (a factory list taken before the unload) starts its successor, or
-  leaves the right for the next registration. A disabled plugin keeps the port closed; a load the
-  engine abandoned past its deadline registers no connect factory and never takes it over; a failed
-  bind keeps the right for the next reload. Eight regression tests; 19 bridge + 4 control tests.
+  until a gateway restart (Hermes 0.22.2 and 0.23.0 alike). Now the first Telegram connect records a
+  process-wide fact, "this is a gateway that connected Telegram", and every later registration of
+  the enabled plugin listens at once on the same port; a connect that reaches an unloaded bridge (a
+  factory list taken before the unload) starts its successor. A fact, not a one-shot token, so no
+  interleaving of unloads, registrations and late connects can lose it. A disabled plugin keeps the
+  port closed; a load the engine abandoned past its deadline registers no connect factory and never
+  listens; a failed bind is retried by the next reload or connect. Nine regression tests; 20 bridge
+  + 4 control tests.
 
 ## 0.3.0
 

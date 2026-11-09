@@ -32,32 +32,25 @@ def is_paused():
     return is_engaged()
 
 
-# A forced plugin re-discovery in a running gateway (reload-plugins from `hermes plugins enable/disable`,
-# the Desktop switch, a tool re-scanning for a missing provider) unloads this plugin, which closes the
-# listener, and registers it again. The engine does not call the new connect factory on the same
-# Telegram client: it keys factories by plugin and __qualname__ and skips a known key. So the right to
-# listen, which only the gateway's Telegram connect grants, is handed across the reload: an unload that
-# closed a serving listener leaves it pending, and so does a connect that reaches an unloaded bridge
-# (a factory list taken before the unload) while no successor is registered yet; with a successor, that
-# connect starts the successor. The registration takes a pending right once. The state lives in
-# sys.modules because the engine imports the plugin package again on a re-discovery, which would reset
-# a module global. One owner per process: the plugin runs only in the default profile.
+# A forced plugin re-discovery in a running gateway (`hermes plugins install/enable/disable/update`, the
+# Desktop switch, a tool re-scanning for a missing provider) unloads this plugin, which closes the listener,
+# and registers it again; the engine does not call a connect factory it has already wired on the same
+# Telegram client. The right to listen comes only from the gateway's Telegram connect, so the first connect
+# records a sticky fact of the process, "this is a gateway that connected Telegram", and every later
+# registration of an enabled bridge listens at once. A fact, not a one-shot token: no interleaving of
+# unloads, registrations and late connects can lose it. It lives in sys.modules because the engine imports
+# the plugin package again on a re-discovery; one owner per process (the default profile only). `current`
+# is the registered bridge, so a connect that reaches an unloaded bridge starts its successor.
 _HANDOVER = "_alice_voice_listener_handover"
 
 
 def _handover():
     module = sys.modules.get(_HANDOVER)
     if module is None:
-        fresh = types.ModuleType(_HANDOVER, "alice-voice: the right to listen across a plugin reload")
-        fresh.lock, fresh.pending, fresh.current = Lock(), False, None
+        fresh = types.ModuleType(_HANDOVER, "alice-voice: this process is a gateway that connected Telegram")
+        fresh.lock, fresh.connected, fresh.current = Lock(), False, None
         module = sys.modules.setdefault(_HANDOVER, fresh)
     return module
-
-
-def arm_handover():
-    state = _handover()
-    with state.lock:
-        state.pending = True
 
 
 class AliceBridge:
@@ -142,17 +135,16 @@ class AliceBridge:
         return result
 
     def on_telegram_connect(self, _native, _adapter):
-        with self.lock:  # checked and started under one lock: close() cannot slip in between
-            if not self.unloaded:
-                self.start()
-                return
         state = _handover()
         with state.lock:
+            state.connected = True
             successor = state.current
-            if successor is None or successor is self:
-                state.pending = True  # the next registration takes it
+        with self.lock:  # checked and started under one lock: close() cannot slip in between
+            if not self.unloaded:
+                self.start_logged()
                 return
-        successor.start_or_keep_pending()
+        if successor is not None and successor is not self:  # a factory list taken before the unload
+            successor.start_logged()
 
     def start(self):
         """True when this bridge listens afterwards; False when it is unloaded (or disabled)."""
@@ -168,31 +160,24 @@ class AliceBridge:
             self.thread.start()
             return True
 
-    def start_or_keep_pending(self):
-        """Use a handed-over right to listen, or put it back for the next registration: when this bridge
-        was unloaded before it could start (its close() saw no listener and left nothing pending), or
-        when the port is taken (the next reload tries again, so does a new Telegram client)."""
+    def start_logged(self):
         try:
-            if self.start():
-                return
-        except OSError as exc:
-            logger.warning("alice-voice: listener not restored after the plugin reload (%s)", type(exc).__name__)
-        arm_handover()
+            self.start()
+        except OSError as exc:  # the port is taken: the next reload or Telegram connect tries again
+            logger.warning("alice-voice: listener not started (%s)", type(exc).__name__)
 
     def adopt(self):
         """In register(), once the engine accepted the unload callback: become this process's bridge and
-        take a pending right to listen. Under the bridge lock throughout, so an unload that lands now (a
-        load deadline firing) closes either before (nothing taken) or after (a serving listener, whose
-        close() leaves the right pending again). Lock order everywhere: bridge, then state."""
+        listen at once if the gateway already connected Telegram. Lock order everywhere: bridge, then state."""
         with self.lock:
             if not self.enabled:
                 return
             state = _handover()
             with state.lock:
                 state.current = self
-                pending, state.pending = state.pending, False
-            if pending:
-                self.start_or_keep_pending()
+                connected = state.connected
+            if connected:
+                self.start_logged()
 
     def close(self):
         with self.lock:
@@ -210,7 +195,6 @@ class AliceBridge:
             server.server_close()
             assert thread is not None
             thread.join(timeout=2)
-            arm_handover()
 
 
 class AliceServer(HTTPServer):
