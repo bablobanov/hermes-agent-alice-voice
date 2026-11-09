@@ -10,6 +10,7 @@ import secrets
 import sys
 from threading import Event, Thread
 import time
+from types import ModuleType
 import unittest
 from unittest.mock import patch
 
@@ -88,6 +89,14 @@ class BridgeTests(unittest.TestCase):
         # Process-wide state that outlives a plugin reload (bridge.py): every test starts as a fresh process.
         sys.modules.pop("_alice_voice_listener_handover", None)
         self.addCleanup(sys.modules.pop, "_alice_voice_listener_handover", None)
+        # The plugin's own register() builds the bridge with the default pause predicate, which imports
+        # the engine's `agent.estop` on every request. The suite runs without an engine (CI), so stand it
+        # in: a gateway that is not paused. The pause test below installs its own stand-in over this one.
+        engine, estop = ModuleType("agent"), ModuleType("agent.estop")
+        setattr(estop, "is_engaged", lambda: False)
+        engine_present = patch.dict(sys.modules, {"agent": engine, "agent.estop": estop})
+        engine_present.start()
+        self.addCleanup(engine_present.stop)
 
     def bridge(self, ctx=None, paused=lambda: False):
         if not (ROOT / "bridge.py").exists():
@@ -184,7 +193,6 @@ class BridgeTests(unittest.TestCase):
         self.assertEqual(bridge.handle(self.path, envelope())[0], 503)
         self.assertEqual(bridge.ctx.calls, [])
         # The default predicate calls the SDK's estop API; no live sentinel is changed.
-        from types import ModuleType
         agent, estop = ModuleType("agent"), ModuleType("agent.estop")
         observed = []
         setattr(estop, "is_engaged", lambda: observed.append(True) or True)
