@@ -2,12 +2,17 @@
 
 import hmac
 import json
+import logging
 import os
 import re
+import sys
+import types
 from collections import OrderedDict
 from http.server import BaseHTTPRequestHandler, HTTPServer
-from threading import RLock, Thread
+from threading import Lock, RLock, Thread
 from typing import cast
+
+logger = logging.getLogger("alice-voice")
 
 ACK = "Запрос принят для обработки. Ответ будет в Telegram"
 DENIED = "Запрос отклонён"
@@ -27,12 +32,34 @@ def is_paused():
     return is_engaged()
 
 
+# A forced plugin re-discovery in a running gateway (`hermes plugins install/enable/disable/update`, the
+# Desktop switch, a tool re-scanning for a missing provider) unloads this plugin, which closes the listener,
+# and registers it again; the engine does not call a connect factory it has already wired on the same
+# Telegram client. The right to listen comes only from the gateway's Telegram connect, so the first connect
+# records a sticky fact of the process, "this is a gateway that connected Telegram", and every later
+# registration of an enabled bridge listens at once. A fact, not a one-shot token: no interleaving of
+# unloads, registrations and late connects can lose it. It lives in sys.modules because the engine imports
+# the plugin package again on a re-discovery; one owner per process (the default profile only). `current`
+# is the registered bridge, so a connect that reaches an unloaded bridge starts its successor.
+_HANDOVER = "_alice_voice_listener_handover"
+
+
+def _handover():
+    module = sys.modules.get(_HANDOVER)
+    if module is None:
+        fresh = types.ModuleType(_HANDOVER, "alice-voice: this process is a gateway that connected Telegram")
+        fresh.lock, fresh.connected, fresh.current = Lock(), False, None
+        module = sys.modules.setdefault(_HANDOVER, fresh)
+    return module
+
+
 class AliceBridge:
     def __init__(self, ctx, paused=None):
         self.ctx = ctx
         self.cache = OrderedDict()
         self.lock = RLock()
         self.server = self.thread = None
+        self.unloaded = False  # set by close(), the engine's unload; unlike a disabled configuration
         self.paused = paused or is_paused
         self.session_key = ctx.get_config("session_key", "")
         self.skill_id = ctx.get_config("skill_id", "")
@@ -108,21 +135,61 @@ class AliceBridge:
         return result
 
     def on_telegram_connect(self, _native, _adapter):
-        with self.lock:
-            if not self.enabled or self.server is not None:
+        state = _handover()
+        with state.lock:
+            state.connected = True
+            successor = state.current
+        with self.lock:  # checked and started under one lock: close() cannot slip in between
+            if not self.unloaded:
+                self.start_logged()
                 return
+        if successor is not None and successor is not self:  # a factory list taken before the unload
+            successor.start_logged()
+
+    def start(self):
+        """True when this bridge listens afterwards; False when it is unloaded (or disabled)."""
+        with self.lock:
+            if self.server is not None:
+                return True
+            if not self.enabled:
+                return False
             self.server = AliceServer(("127.0.0.1", self.port), AliceHandler)
             self.server.bridge = self
             self.thread = Thread(target=self.server.serve_forever, kwargs={"poll_interval": 0.1},
                                  name="alice-voice", daemon=True)
             self.thread.start()
+            return True
+
+    def start_logged(self):
+        try:
+            self.start()
+        except OSError as exc:  # the port is taken: the next reload or Telegram connect tries again
+            logger.warning("alice-voice: listener not started (%s)", type(exc).__name__)
+
+    def adopt(self):
+        """In register(), once the engine accepted the unload callback: become this process's bridge and
+        listen at once if the gateway already connected Telegram. Lock order everywhere: bridge, then state."""
+        with self.lock:
+            if not self.enabled:
+                return
+            state = _handover()
+            with state.lock:
+                state.current = self
+                connected = state.connected
+            if connected:
+                self.start_logged()
 
     def close(self):
         with self.lock:
             self.enabled = False
+            self.unloaded = True
             self.cache.clear()
             server, thread = self.server, self.thread
             self.server = self.thread = None
+        state = _handover()
+        with state.lock:
+            if state.current is self:
+                state.current = None
         if server is not None:
             server.shutdown()
             server.server_close()

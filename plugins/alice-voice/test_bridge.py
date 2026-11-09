@@ -10,6 +10,7 @@ import secrets
 import sys
 from threading import Event, Thread
 import time
+from types import ModuleType
 import unittest
 from unittest.mock import patch
 
@@ -43,6 +44,31 @@ class Context:
 
     def on_unload(self, callback):
         self.cleanup.append(callback)
+        return object()  # the engine's registration handle; None after an abandoned load
+
+
+class AbandonedLoadContext(Context):
+    """A load that crosses plugins.load_timeout_seconds: from the deadline on, every registrar is a no-op
+    returning None (hermes_cli/plugins.py _ignore_after_abandoned_load, 0.22.2 and 0.23.0). Here the
+    deadline lands right before on_unload, so a factory registered after it would still be recorded:
+    the plugin must not register one."""
+
+    def on_unload(self, callback):
+        return None
+
+
+def free_port():
+    import socket
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        return probe.getsockname()[1]
+
+
+def listening(port):
+    import socket
+    with socket.socket() as probe:
+        probe.settimeout(1)
+        return probe.connect_ex(("127.0.0.1", port)) == 0
 
 
 def envelope(text="Сохрани заметку: Xiaomi 14T Pro", message_id=1):
@@ -60,6 +86,17 @@ class BridgeTests(unittest.TestCase):
         self.env.start()
         self.addCleanup(self.env.stop)
         self.path = "/alice/" + self.secret
+        # Process-wide state that outlives a plugin reload (bridge.py): every test starts as a fresh process.
+        sys.modules.pop("_alice_voice_listener_handover", None)
+        self.addCleanup(sys.modules.pop, "_alice_voice_listener_handover", None)
+        # The plugin's own register() builds the bridge with the default pause predicate, which imports
+        # the engine's `agent.estop` on every request. The suite runs without an engine (CI), so stand it
+        # in: a gateway that is not paused. The pause test below installs its own stand-in over this one.
+        engine, estop = ModuleType("agent"), ModuleType("agent.estop")
+        setattr(estop, "is_engaged", lambda: False)
+        engine_present = patch.dict(sys.modules, {"agent": engine, "agent.estop": estop})
+        engine_present.start()
+        self.addCleanup(engine_present.stop)
 
     def bridge(self, ctx=None, paused=lambda: False):
         if not (ROOT / "bridge.py").exists():
@@ -156,7 +193,6 @@ class BridgeTests(unittest.TestCase):
         self.assertEqual(bridge.handle(self.path, envelope())[0], 503)
         self.assertEqual(bridge.ctx.calls, [])
         # The default predicate calls the SDK's estop API; no live sentinel is changed.
-        from types import ModuleType
         agent, estop = ModuleType("agent"), ModuleType("agent.estop")
         observed = []
         setattr(estop, "is_engaged", lambda: observed.append(True) or True)
@@ -251,6 +287,219 @@ class BridgeTests(unittest.TestCase):
         ctx.factories[0](None, object())
         self.assertIsNone(bridge.server)
         self.assertEqual(ctx.calls, [])
+
+    def load_plugin(self, name):
+        """A fresh copy of the plugin package, as the engine imports it again on a forced re-discovery."""
+        spec = importlib.util.spec_from_file_location(name, ROOT / "__init__.py",
+                                                     submodule_search_locations=[str(ROOT)])
+        assert spec is not None and spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module
+        self.addCleanup(sys.modules.pop, spec.name, None)
+        self.addCleanup(sys.modules.pop, spec.name + ".bridge", None)
+        spec.loader.exec_module(module)
+        return module
+
+    def post(self, port, text, message_id):
+        connection = http.client.HTTPConnection("127.0.0.1", port, timeout=2)
+        try:
+            connection.request("POST", self.path, body=json.dumps(envelope(text, message_id)).encode(),
+                               headers={"Content-Type": "application/json"})
+            response = connection.getresponse()
+            return response.status, json.loads(response.read())["response"]["text"]
+        finally:
+            connection.close()
+
+    def test_listener_comes_back_after_a_plugin_reload(self):
+        """`hermes plugins enable/disable` of any plugin, or the Desktop switch, sends a running gateway
+        `reload-plugins`: a forced re-discovery unloads every plugin and registers it again. The engine
+        keys a connect factory by (plugin, __qualname__) and skips a known key on the same Telegram
+        client, so the new AliceBridge.on_telegram_connect is never called (Hermes 0.22.2 and 0.23.0,
+        gateway/platforms/base.py _wire_plugin_handlers), while the unload closed the old listener.
+        The new registration must take the fixed port over itself; requests then reach the new
+        context, never the unloaded one."""
+        port = free_port()
+        old_ctx = Context(port=port)
+        self.load_plugin("alice_reload_before").register(old_ctx)
+        old_ctx.factories[0](None, object())  # the gateway's Telegram connect
+        self.assertEqual(self.post(port, "before the reload", 1), (200, ACK))
+        for callback in old_ctx.cleanup:  # the forced re-discovery unloads ...
+            callback()
+        new_ctx = Context(port=port)
+        self.load_plugin("alice_reload_after").register(new_ctx)  # ... and registers again
+        self.addCleanup(lambda: [callback() for callback in new_ctx.cleanup])
+        # The engine does not call new_ctx.factories[0]: same plugin, same qualname, same client.
+        self.assertEqual(self.post(port, "after the reload", 2), (200, ACK))
+        self.assertEqual([call[0] for call in old_ctx.calls], ["before the reload"])
+        self.assertEqual([call[0] for call in new_ctx.calls], ["after the reload"])
+        bridge = new_ctx.factories[0].__self__
+        server = bridge.server
+        new_ctx.factories[0](None, object())  # a later Telegram reconnect: no second bind
+        self.assertIs(bridge.server, server)
+
+    def serve_then_unload(self, port):
+        ctx = Context(port=port)
+        self.load_plugin("alice_serving").register(ctx)
+        ctx.factories[0](None, object())
+        for callback in ctx.cleanup:
+            callback()
+        return ctx
+
+    def test_abandoned_load_never_takes_the_listener_over(self):
+        """A reload whose load timed out: no unload callback could ever close a listener started there.
+        The next registration still listens."""
+        port = free_port()
+        self.serve_then_unload(port)
+        abandoned = AbandonedLoadContext(port=port)
+        self.load_plugin("alice_abandoned").register(abandoned)
+        self.assertEqual(abandoned.factories, [])  # no factory without its cleanup
+        self.assertFalse(listening(port))
+        ctx = Context(port=port)
+        self.load_plugin("alice_next").register(ctx)
+        self.addCleanup(lambda: [callback() for callback in ctx.cleanup])
+        self.assertTrue(listening(port))
+
+    def test_failed_bind_after_a_reload_is_retried_by_the_next_one(self):
+        port = free_port()
+        self.serve_then_unload(port)
+        busy = Context(port=port)
+        module = self.load_plugin("alice_busy")
+
+        def taken(*args, **kwargs):
+            raise OSError("address in use (simulated)")
+
+        bridge_module = sys.modules["alice_busy.bridge"]
+        real_server, bridge_module.AliceServer = bridge_module.AliceServer, taken
+        try:
+            with self.assertLogs("alice-voice", "WARNING"):
+                module.register(busy)
+        finally:
+            bridge_module.AliceServer = real_server
+        self.assertIsNone(busy.factories[0].__self__.server)
+        for callback in busy.cleanup:
+            callback()
+        retry = Context(port=port)
+        self.load_plugin("alice_retry").register(retry)
+        self.addCleanup(lambda: [callback() for callback in retry.cleanup])
+        self.assertTrue(listening(port))
+
+    def test_late_connect_of_an_unloaded_bridge_starts_its_successor(self):
+        """The engine's connect or re-wire took its factory list before a reload unloaded the bridge,
+        and calls the old factory afterwards; it then marks the key wired, so the successor's factory
+        never runs. The connect still grants the right to listen: the successor gets it."""
+        port = free_port()
+        old = Context(port=port)
+        self.load_plugin("alice_late_old").register(old)
+        late_factory = old.factories[0]  # taken before the unload, never called before it
+        for callback in old.cleanup:
+            callback()
+        new = Context(port=port)
+        self.load_plugin("alice_late_new").register(new)
+        self.addCleanup(lambda: [callback() for callback in new.cleanup])
+        self.assertFalse(listening(port))  # no Telegram connect in this process yet
+        late_factory(None, object())
+        self.assertTrue(listening(port))
+        self.assertIsNone(late_factory.__self__.server)  # the unloaded bridge itself never binds
+        self.assertEqual(self.post(port, "after the late connect", 1), (200, ACK))
+        self.assertEqual([call[0] for call in new.calls], ["after the late connect"])
+
+    def test_successor_unloaded_between_handover_and_start_the_next_registration_listens(self):
+        """A late connect picks the registered successor; another reload unloads that successor before
+        it starts. The next registration must listen."""
+        port = free_port()
+        old = Context(port=port)
+        self.load_plugin("alice_race_old").register(old)
+        late_factory = old.factories[0]
+        for callback in old.cleanup:
+            callback()
+        successor = Context(port=port)
+        self.load_plugin("alice_race_successor").register(successor)
+        bridge = successor.factories[0].__self__
+        real_start = bridge.start
+
+        def unloaded_first():  # the barrier: the successor's unload lands right before its start
+            for callback in successor.cleanup:
+                callback()
+            return real_start()
+
+        bridge.start = unloaded_first
+        late_factory(None, object())
+        self.assertFalse(listening(port))
+        third = Context(port=port)
+        self.load_plugin("alice_race_third").register(third)
+        self.addCleanup(lambda: [callback() for callback in third.cleanup])
+        self.assertTrue(listening(port))
+
+    def test_successor_registered_while_a_late_connect_is_in_flight_listens(self):
+        """A late connect picks the registered bridge A; before A starts, another reload unloads A and
+        registers B all the way through. B must end up listening, without yet another registration."""
+        port = free_port()
+        old = Context(port=port)
+        self.load_plugin("alice_flight_old").register(old)
+        late_factory = old.factories[0]
+        for callback in old.cleanup:
+            callback()
+        first = Context(port=port)
+        self.load_plugin("alice_flight_a").register(first)
+        bridge = first.factories[0].__self__
+        real_start = bridge.start
+        second = Context(port=port)
+
+        def reload_in_between():  # the barrier: A unloaded and B registered before A starts
+            for callback in first.cleanup:
+                callback()
+            self.load_plugin("alice_flight_b").register(second)
+            return real_start()
+
+        bridge.start = reload_in_between
+        self.addCleanup(lambda: [callback() for callback in second.cleanup])
+        late_factory(None, object())
+        self.assertTrue(listening(port))
+        self.assertEqual(self.post(port, "after the race", 1), (200, ACK))
+        self.assertEqual([call[0] for call in second.calls], ["after the race"])
+
+    def test_late_connect_before_the_successor_registers_lets_it_listen(self):
+        port = free_port()
+        old = Context(port=port)
+        self.load_plugin("alice_early_old").register(old)
+        for callback in old.cleanup:
+            callback()
+        old.factories[0](None, object())  # between the unload and the next registration
+        self.assertFalse(listening(port))
+        new = Context(port=port)
+        self.load_plugin("alice_early_new").register(new)
+        self.addCleanup(lambda: [callback() for callback in new.cleanup])
+        self.assertTrue(listening(port))
+
+    def test_disabled_or_foreign_registration_keeps_the_right_and_binds_nothing(self):
+        """A reload that registers the plugin disabled in its settings, or in a non-default profile,
+        binds nothing; enabling it again in the default profile listens at once."""
+        port = free_port()
+        self.serve_then_unload(port)
+        foreign = Context(port=port)
+        foreign.profile_name = "other-profile"
+        for ctx, name in ((Context(port=port, enabled=False), "alice_disabled"), (foreign, "alice_foreign")):
+            self.load_plugin(name).register(ctx)
+            self.assertEqual(ctx.factories, [])
+            self.assertFalse(listening(port))
+        again = Context(port=port)
+        self.load_plugin("alice_enabled_again").register(again)
+        self.addCleanup(lambda: [callback() for callback in again.cleanup])
+        self.assertTrue(listening(port))
+
+    def test_reload_without_a_serving_listener_binds_nothing(self):
+        """A registration that follows no serving listener (a CLI process, or a gateway whose Telegram
+        never connected) still binds only on the connect factory."""
+        ctx = Context(port=free_port())
+        self.load_plugin("alice_first_load").register(ctx)
+        self.addCleanup(lambda: [callback() for callback in ctx.cleanup])
+        self.assertIsNone(ctx.factories[0].__self__.server)
+        for callback in ctx.cleanup:  # unload before any connect
+            callback()
+        again = Context(port=ctx.settings["port"])
+        self.load_plugin("alice_second_load").register(again)
+        self.addCleanup(lambda: [callback() for callback in again.cleanup])
+        self.assertIsNone(again.factories[0].__self__.server)
 
 
     def test_close_releases_lock_before_shutdown(self):
