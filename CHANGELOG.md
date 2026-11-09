@@ -14,7 +14,9 @@
   interleaving of unloads, registrations and late connects can lose it. A disabled plugin keeps the
   port closed; a load the engine abandoned past its deadline registers no connect factory and never
   listens; a failed bind is retried by the next reload or connect. Nine regression tests; 20 bridge
-  + 4 control tests.
+  + 4 control tests. Updating from 0.3.0 inside a running gateway: 0.3.0 does not record the
+  Telegram connect, so the listener comes back after one gateway restart (or a Telegram reconnect);
+  later reloads keep it.
 
 ## 0.3.0
 
