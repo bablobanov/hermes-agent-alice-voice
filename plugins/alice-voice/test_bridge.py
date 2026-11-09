@@ -422,6 +422,34 @@ class BridgeTests(unittest.TestCase):
         self.addCleanup(lambda: [callback() for callback in third.cleanup])
         self.assertTrue(listening(port))
 
+    def test_successor_registered_while_a_late_connect_is_in_flight_listens(self):
+        """A late connect picks the registered bridge A; before A starts, another reload unloads A and
+        registers B all the way through. B must end up listening, without yet another registration."""
+        port = free_port()
+        old = Context(port=port)
+        self.load_plugin("alice_flight_old").register(old)
+        late_factory = old.factories[0]
+        for callback in old.cleanup:
+            callback()
+        first = Context(port=port)
+        self.load_plugin("alice_flight_a").register(first)
+        bridge = first.factories[0].__self__
+        real_start = bridge.start
+        second = Context(port=port)
+
+        def reload_in_between():  # the barrier: A unloaded and B registered before A starts
+            for callback in first.cleanup:
+                callback()
+            self.load_plugin("alice_flight_b").register(second)
+            return real_start()
+
+        bridge.start = reload_in_between
+        self.addCleanup(lambda: [callback() for callback in second.cleanup])
+        late_factory(None, object())
+        self.assertTrue(listening(port))
+        self.assertEqual(self.post(port, "after the race", 1), (200, ACK))
+        self.assertEqual([call[0] for call in second.calls], ["after the race"])
+
     def test_late_connect_before_the_successor_registers_leaves_the_right_pending(self):
         port = free_port()
         old = Context(port=port)
