@@ -1,7 +1,7 @@
 name: alice-voice
 label: Private Alice voice input
 kind: standalone
-version: 0.3.1
+version: 0.3.2
 description: Private Alice voice input via stock gateway injection; responses only in Telegram
 requires_hermes: ">=0.21.3"
 author: Ilya Balobanov
