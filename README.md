@@ -4,7 +4,7 @@
 
 [Русский](README.ru.md) · [Contributing](CONTRIBUTING.md) · [Security](SECURITY.md)
 
-**0.3.1 — voice input only, without Hermes SDK patches.** A private Yandex Alice skill sends recognized text to one existing Hermes Telegram DM session. Hermes processes the task through its normal gateway; the result is delivered in Telegram, not spoken by Alice.
+**0.3.2 — voice input only, without Hermes SDK patches.** A private Yandex Alice skill sends recognized text to one existing Hermes Telegram DM session. Hermes processes the task through its normal gateway; the result is delivered in Telegram, not spoken by Alice.
 
 ```text
 Alice → private skill → HTTPS endpoint → local plugin → stock gateway injection → Telegram
@@ -83,7 +83,7 @@ The optional test checks the **current** three source hashes before copying SDK/
 
 ## Project
 
-- `plugins/alice-voice/`: three runtime files and local tests.
+- `plugins/alice-voice/`: three runtime files, local tests and a copy of this README, which the Hermes plugin marketplace shows for the catalog entry.
 - [Changelog](CHANGELOG.md), [license](LICENSE), [third-party notices](THIRD_PARTY_NOTICES.md).
 - No SDK diffs, patch installers, deployment helpers, or production configuration are distributed.
 

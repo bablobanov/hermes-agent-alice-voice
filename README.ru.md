@@ -4,7 +4,7 @@
 
 [English](README.md) · [Участие](CONTRIBUTING.md) · [Безопасность](SECURITY.md)
 
-**0.3.1 — только голосовой ввод, без патчей SDK Hermes.** Приватный навык Алисы передаёт распознанный текст в одну существующую личную Telegram-сессию Hermes. Ответ приходит в Telegram, а не озвучивается Алисой.
+**0.3.2 — только голосовой ввод, без патчей SDK Hermes.** Приватный навык Алисы передаёт распознанный текст в одну существующую личную Telegram-сессию Hermes. Ответ приходит в Telegram, а не озвучивается Алисой.
 
 ```text
 Алиса → приватный навык → HTTPS → локальный плагин → штатный gateway → Telegram
@@ -77,6 +77,6 @@ python -B -m unittest discover -s plugins/alice-voice -p test_sdk_http.py -v
 
 ## Проект
 
-В `plugins/alice-voice/` — три runtime-файла и тесты. [Изменения](CHANGELOG.md), [MIT](LICENSE), [third-party notices](THIRD_PARTY_NOTICES.md). SDK diff, patch installer, deploy helpers и production-конфигурация не поставляются.
+В `plugins/alice-voice/` — три runtime-файла, тесты и копия английского README, которую показывает маркетплейс плагинов Hermes для записи каталога. [Изменения](CHANGELOG.md), [MIT](LICENSE), [third-party notices](THIRD_PARTY_NOTICES.md). SDK diff, patch installer, deploy helpers и production-конфигурация не поставляются.
 
 MIT © 2026 Ilya Balobanov. Независимая интеграция, не официальный продукт Яндекса или Nous Research.

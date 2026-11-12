@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.2
+
+- The plugin folder carries its own README, `plugins/alice-voice/README.md`: the repository README with its
+  links pointing up to the root. It is for the Hermes plugin marketplace, which shows "no README" for catalog
+  entries whose README is only at the repository root (NousResearch/hermes-agent#149607). No code changes.
+
 ## 0.3.1
 
 - The voice input survives a plugin reload. Any forced plugin re-discovery in a running gateway
