@@ -6,8 +6,10 @@ import logging
 import os
 import re
 import sys
+import time
 import types
-from collections import OrderedDict
+import unicodedata
+from collections import OrderedDict, deque
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from threading import Lock, RLock, Thread
 from typing import cast
@@ -17,6 +19,11 @@ logger = logging.getLogger("alice-voice")
 ACK = "Запрос принят для обработки. Ответ будет в Telegram"
 DENIED = "Запрос отклонён"
 NOT_SENT = "Запрос не отправлен. Попробуйте позже"
+BUSY = "Слишком много задач подряд. Попробуйте через минуту"
+# Every voice task reaches the session as "<tag> <spoken text>", one line (line breaks are refused below),
+# so an agent rule can ask for a Telegram confirmation of irreversible actions from this channel.
+VOICE_TAG = "[Голосовая задача из Алисы]"
+RATE_LIMIT, RATE_WINDOW = 5, 60.0  # scheduled tasks per sliding window, seconds
 
 
 def reply(text, end_session=False):
@@ -57,6 +64,8 @@ class AliceBridge:
     def __init__(self, ctx, paused=None):
         self.ctx = ctx
         self.cache = OrderedDict()
+        self.scheduled = deque()  # clock() of each task scheduled within the last RATE_WINDOW
+        self.clock = time.monotonic
         self.lock = RLock()
         self.server = self.thread = None
         self.unloaded = False  # set by close(), the engine's unload; unlike a disabled configuration
@@ -67,13 +76,17 @@ class AliceBridge:
         self.port = ctx.get_config("port", 8788)
         secret = os.environ.get("ALICE_WEBHOOK_SECRET", "")
         self.secret_path = ("/alice/" + secret).encode()
-        self.enabled = bool(ctx.get_config("enabled", False) is True and ctx.profile_name == "default"
+        wanted = ctx.get_config("enabled", False) is True and ctx.profile_name == "default"
+        owner = identifier(self.owner_user_id) and not self.owner_user_id.startswith("<")
+        self.enabled = bool(wanted and owner
                             and identifier(self.skill_id) and not self.skill_id.startswith("<")
                             and isinstance(self.session_key, str)
                             and re.fullmatch(r"agent:main:telegram:dm:[1-9][0-9]*", self.session_key)
-                            and isinstance(self.owner_user_id, str)
                             and type(self.port) is int and 0 <= self.port <= 65535
                             and re.fullmatch(r"[0-9a-fA-F]{64}", secret) and len(set(secret)) >= 4)
+        if wanted and not owner:
+            logger.warning("alice-voice: bridge is off: set owner_user_id to the owner's Alice account id "
+                           "(session.user.user_id of your private skill); required since 0.3.3")
 
     def handle(self, path, data):
         with self.lock:
@@ -91,8 +104,7 @@ class AliceBridge:
             return 400, reply(DENIED)
         user = session.get("user")
         account = user.get("user_id") if isinstance(user, dict) else None
-        if (session.get("skill_id") != self.skill_id or not identifier(account)
-                or (self.owner_user_id and account != self.owner_user_id)):
+        if session.get("skill_id") != self.skill_id or not identifier(account) or account != self.owner_user_id:
             return 403, reply(DENIED)
         if (not identifier(session.get("session_id"))
                 or type(session.get("message_id")) is not int or session["message_id"] < 0
@@ -104,7 +116,8 @@ class AliceBridge:
         for value in (command, original):
             if len(value) > 4096:
                 return 400, reply(DENIED)
-            if value.lstrip().startswith("/") or any(ord(c) < 32 or ord(c) == 127 for c in value):
+            # Cc: C0, DEL and C1 (NEL) controls; Zl/Zp: Unicode line/paragraph separators. No second line.
+            if value.lstrip().startswith("/") or any(unicodedata.category(c) in ("Cc", "Zl", "Zp") for c in value):
                 return 403, reply(DENIED)
         text = original if original.strip() else command
         if (session.get("new") is True and not command.strip()) or not text.strip():
@@ -121,13 +134,19 @@ class AliceBridge:
         key = (self.skill_id, account, session["session_id"], session["message_id"])
         if key in self.cache:
             return self.cache[key]
+        now = self.clock()
+        while self.scheduled and now - self.scheduled[0] >= RATE_WINDOW:
+            self.scheduled.popleft()
+        if len(self.scheduled) >= RATE_LIMIT:
+            return 200, reply(BUSY)  # 200, so Alice speaks the refusal; Yandex counts a 5xx as a skill error
         try:
             # Stock SDK: True acknowledges async scheduling, never delivery or completion.
-            accepted = self.ctx.inject_message(text, role="user", session_key=self.session_key)
+            accepted = self.ctx.inject_message(VOICE_TAG + " " + text, role="user", session_key=self.session_key)
         except Exception:
             accepted = False
         if not accepted:
             return 503, reply(NOT_SENT)
+        self.scheduled.append(now)
         result = (200, reply(ACK))
         self.cache[key] = result
         if len(self.cache) > 32:
