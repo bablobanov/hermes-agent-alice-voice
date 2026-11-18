@@ -150,11 +150,14 @@ class BridgeTests(unittest.TestCase):
     def test_owner_user_id_is_required(self):
         """Without the owner's Alice account id the bridge stays off, as with an invalid secret, and says
         why in the log. 0.3.2 and earlier let an empty value through: any signed-in account with the link
-        and the skill id could send tasks."""
-        for owner in ("", None, "<YOUR_ALICE_ACCOUNT_USER_ID>", 12345, "x" * 257):
+        and the skill id could send tasks. A blank or padded value is not an id either: a request carrying
+        the same blank would otherwise pass without the owner's real id."""
+        missing = object()
+        for owner in ("", missing, None, "<YOUR_ALICE_ACCOUNT_USER_ID>", 12345, "x" * 257,
+                      " ", " ", " <YOUR_ALICE_ACCOUNT_USER_ID>", "test-account ", "\ttest-account"):
             with self.subTest(owner=owner):
-                ctx = Context(owner_user_id=owner) if owner is not None else Context()
-                if owner is None:
+                ctx = Context(owner_user_id=owner) if owner is not missing else Context()
+                if owner is missing:
                     ctx.settings.pop("owner_user_id")
                 with self.assertLogs("alice-voice", "WARNING") as logs:
                     bridge = self.bridge(ctx)
@@ -164,6 +167,9 @@ class BridgeTests(unittest.TestCase):
                 data["session"]["user"]["user_id"] = "another-signed-in-account"
                 self.assertEqual(bridge.handle(self.path, data)[0], 503)
                 self.assertEqual(bridge.handle(self.path, envelope())[0], 503)
+                if isinstance(owner, str):  # the forged request repeats the configured value
+                    data["session"]["user"]["user_id"] = owner
+                    self.assertEqual(bridge.handle(self.path, data)[0], 503)
                 self.assertEqual(bridge.ctx.calls, [])
         # A bridge that is off for its own reason does not blame the owner id.
         with self.assertNoLogs("alice-voice", "WARNING"):
@@ -173,11 +179,13 @@ class BridgeTests(unittest.TestCase):
             self.bridge(foreign)
 
     def test_plugin_without_owner_registers_nothing(self):
-        module = self.load_plugin("alice_no_owner")
-        ctx = Context(owner_user_id="")
-        with self.assertLogs("alice-voice", "WARNING"):
-            module.register(ctx)
-        self.assertEqual((ctx.factories, ctx.cleanup), ([], []))
+        for number, owner in enumerate(("", " ", " <YOUR_ALICE_ACCOUNT_USER_ID>")):
+            with self.subTest(owner=owner):
+                module = self.load_plugin(f"alice_no_owner_{number}")
+                ctx = Context(owner_user_id=owner)
+                with self.assertLogs("alice-voice", "WARNING"):
+                    module.register(ctx)
+                self.assertEqual((ctx.factories, ctx.cleanup), ([], []))
 
     def test_rate_limit_refuses_by_voice_and_frees_up_after_a_minute(self):
         now = [1000.0]
@@ -200,6 +208,29 @@ class BridgeTests(unittest.TestCase):
         now[0] = 1060.1  # the first task is a minute old: one slot frees up, a sliding window
         self.assertEqual(bridge.handle(self.path, envelope(message_id=6))[1]["response"]["text"], ACK)
         self.assertEqual(bridge.handle(self.path, envelope(message_id=8))[1]["response"]["text"], BUSY)
+        self.assertEqual(len(bridge.ctx.calls), 6)
+
+    def test_rate_limit_slot_is_held_a_minute_from_scheduling(self):
+        """The minute of a slot starts when the task was scheduled, not when its request came in, so a slow
+        inject_message cannot let a sixth task in within a minute of the first one being scheduled."""
+        now = [0.0]
+        bridge = self.bridge()
+        bridge.clock = lambda: now[0]
+        inject = bridge.ctx.inject_message
+
+        def slow_first(content, role="user", *, session_key=None):
+            if now[0] == 0.0:
+                now[0] = 1.0  # the first task is scheduled a second after its request came in
+            return inject(content, role, session_key=session_key)
+
+        bridge.ctx.inject_message = slow_first
+        for message_id, at in enumerate((0.0, 10.0, 20.0, 30.0, 40.0), start=1):
+            now[0] = at
+            self.assertEqual(bridge.handle(self.path, envelope(message_id=message_id))[1]["response"]["text"], ACK)
+        now[0] = 60.5  # 61.5 s after the first request, 59.5 s after its task was scheduled
+        self.assertEqual(bridge.handle(self.path, envelope(message_id=6))[1]["response"]["text"], BUSY)
+        now[0] = 61.0
+        self.assertEqual(bridge.handle(self.path, envelope(message_id=6))[1]["response"]["text"], ACK)
         self.assertEqual(len(bridge.ctx.calls), 6)
 
     def test_rate_limit_counts_only_scheduled_tasks(self):
@@ -256,8 +287,9 @@ class BridgeTests(unittest.TestCase):
                 self.assertEqual(bridge.ctx.calls, [])
 
     def test_inactive_configuration_and_core_pause_do_not_inject(self):
-        cases = [{"enabled": False}, {"enabled": "true"}, {"skill_id": ""},
-                 {"session_key": ""}, {"port": "8788"}]
+        cases = [{"enabled": False}, {"enabled": "true"}, {"skill_id": ""}, {"skill_id": " "},
+                 {"skill_id": "<YOUR_PRIVATE_ALICE_SKILL_ID>"}, {"skill_id": " <YOUR_PRIVATE_ALICE_SKILL_ID>"},
+                 {"skill_id": "test-skill "}, {"session_key": ""}, {"port": "8788"}]
         for settings in cases:
             with self.subTest(settings=settings):
                 bridge = self.bridge(Context(**settings))

@@ -34,6 +34,11 @@ def identifier(value):
     return isinstance(value, str) and 0 < len(value) <= 256
 
 
+def configured(value):
+    """An operator's id setting: not blank, not padded, not the `<...>` placeholder from the README."""
+    return identifier(value) and value == value.strip() and not value.startswith("<")
+
+
 def is_paused():
     from agent.estop import is_engaged
     return is_engaged()
@@ -77,9 +82,8 @@ class AliceBridge:
         secret = os.environ.get("ALICE_WEBHOOK_SECRET", "")
         self.secret_path = ("/alice/" + secret).encode()
         wanted = ctx.get_config("enabled", False) is True and ctx.profile_name == "default"
-        owner = identifier(self.owner_user_id) and not self.owner_user_id.startswith("<")
-        self.enabled = bool(wanted and owner
-                            and identifier(self.skill_id) and not self.skill_id.startswith("<")
+        owner = configured(self.owner_user_id)
+        self.enabled = bool(wanted and owner and configured(self.skill_id)
                             and isinstance(self.session_key, str)
                             and re.fullmatch(r"agent:main:telegram:dm:[1-9][0-9]*", self.session_key)
                             and type(self.port) is int and 0 <= self.port <= 65535
@@ -146,7 +150,7 @@ class AliceBridge:
             accepted = False
         if not accepted:
             return 503, reply(NOT_SENT)
-        self.scheduled.append(now)
+        self.scheduled.append(self.clock())  # the slot's minute starts once the task is scheduled
         result = (200, reply(ACK))
         self.cache[key] = result
         if len(self.cache) > 32:
