@@ -76,12 +76,13 @@ def child():
     from agent import estop
     sys.path.insert(0, str(HERE))
     from bridge import AliceBridge
-    from test_bridge import envelope
+    from test_bridge import envelope, voiced
 
     session_key = 'agent:main:telegram:dm:1001'
     home = Path(os.environ['HERMES_HOME'])
     home.mkdir(exist_ok=True)
-    settings = {'enabled': True, 'skill_id': 'test-skill', 'session_key': session_key, 'port': 0}
+    settings = {'enabled': True, 'skill_id': 'test-skill', 'session_key': session_key,
+                'owner_user_id': 'test-account', 'port': 0}
     config = {'plugins': {'entries': {'alice-voice': {'allow_gateway_injection': True, 'settings': settings}}}}
     (home / 'config.yaml').write_text(json.dumps(config))
     os.environ['ALICE_WEBHOOK_SECRET'] = secrets.token_hex(32)
@@ -293,7 +294,7 @@ def child():
             event = self.calls[0]
             self.assertTrue(event.internal)
             self.assertFalse(event.allow_gateway_control)
-            self.assertEqual(event.text, 'literal fixture HTTP')
+            self.assertEqual(event.text, voiced('literal fixture HTTP'))
             self.assertEqual(event.source.chat_id, '1001')
             self.assertEqual(event.metadata['gateway_session_key'], session_key)
             self.assertEqual(event.metadata['gateway_session_id'], 'fixture-session')
@@ -301,7 +302,8 @@ def child():
             self.assertEqual(event.metadata['hermes_plugin_id'], 'alice-voice')
             self.release.set()
             self.wait_done()
-            self.assertEqual(self.outputs[0]['final_response'], 'SYNTHETIC fixture reply: literal fixture HTTP')
+            self.assertEqual(self.outputs[0]['final_response'],
+                             'SYNTHETIC fixture reply: ' + voiced('literal fixture HTTP'))
             self.assertEqual(self.post(bridge, 'Ответ готов?', 3)[1]['text'], 'Ответ будет в Telegram')
             self.assertEqual(len(self.calls), 1)
             print('SYNTHETIC: real stock HTTP/SDK dispatch/turn, ACK before worker; no voice result, no live delivery')

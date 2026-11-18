@@ -1,7 +1,7 @@
 name: alice-voice
 label: Private Alice voice input
 kind: standalone
-version: 0.3.2
+version: 0.3.3
 description: Private Alice voice input via stock gateway injection; responses only in Telegram
 requires_hermes: ">=0.21.3"
 author: Ilya Balobanov
@@ -22,4 +22,5 @@ config_schema:
     default: 8788
   owner_user_id:
     type: str
-    default: ""
+    required: true
+    description: "Alice account id of the owner (session.user.user_id of your private skill); the bridge stays off without it"
